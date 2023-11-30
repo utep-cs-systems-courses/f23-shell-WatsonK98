@@ -1,46 +1,54 @@
-#! /usr/bin/env python3
-
-import os, sys, re
+import os
+import sys
+import re
 
 pid = os.getpid()
 
-while 1:
-    os.write(1,("$").encode())
-    cmd = os.read(0, 50).decode().strip()
-    if(cmd == "exit"):
+while True:
+    os.write(1, ("$").encode())
+    input_cmd = os.read(0, 50).decode().strip()
+    
+    if input_cmd == "exit":
         break
 
-    rc = os.fork()
+    # Split commands based on pipe symbol '|'
+    commands = input_cmd.split('|')
 
-    if rc < 0:
-        os.write(2, ("fork failed, returning %d\n" % rc).encode())
-        sys.exit(1)
+    # Iterate over each command in the pipeline
+    prev_read = 0  # File descriptor to read from initially
+    for i, cmd in enumerate(commands):
+        rc = os.fork()
 
-    elif rc == 0:                   # child
-        os.write(1, ("Child: My pid==%d.  Parent's pid=%d\n" % 
-                    (os.getpid(), pid)).encode())
-        args = ["wc", "p3-exec.py"]
+        if rc < 0:
+            os.write(2, ("fork failed, returning %d\n" % rc).encode())
+            sys.exit(1)
 
-        for i in range(len(args)-1):
-            os.close(1)
-            fa = str(os.open(args[i+1], os.O_WRONLY | os.O_CREAT))
-            os.set_inheritable(1, True)
-            n = len(args)
-            for j in range(o, n-i):
-                args.pop()
+        elif rc == 0:  # child
+            os.write(1, ("Child: My pid==%d. Parent's pid=%d\n" % (os.getpid(), pid)).encode())
 
-        for dir in re.split(":", os.environ['PATH']): # try each directory in path
-            program = "%s/%s" % (dir, args[0])
-            try:
-                os.execve(program, args, os.environ) # try to exec program
-            except FileNotFoundError:             # ...expected
-                pass                              # ...fail quietly 
+            # Redirect input if not the first command
+            if i > 0:
+                os.dup2(prev_read, 0)
+                os.close(prev_read)
 
-        os.write(2, ("Child:    Error: Could not exec %s\n" % args[0]).encode())
-        sys.exit(1)                 # terminate with error
+            # Redirect output if not the last command
+            if i < len(commands) - 1:
+                os.dup2(os.pipe()[1], 1)
 
-    else:                           # parent (forked ok)
-        os.write(1, ("Parent: My pid=%d.  Child's pid=%d\n" % 
-                    (pid, rc)).encode())
-        if(not cmd[len(cmd)-1] == "$"):
-            childPidCode = os.wait()
+            # Parse and execute the command
+            args = cmd.split()
+            for dir in re.split(":", os.environ['PATH']):
+                program = "%s/%s" % (dir, args[0])
+                try:
+                    os.execve(program, args, os.environ)
+                except FileNotFoundError:
+                    pass
+
+            os.write(2, ("Child: Error: Could not exec %s\n" % args[0]).encode())
+            sys.exit(1)
+
+        else:  # parent
+            os.write(1, ("Parent: My pid=%d. Child's pid=%d\n" % (pid, rc)).encode())
+            os.wait()  # Wait for the child process to finish
+            prev_read = os.pipe()[0]  # File descriptor to read from next
+
